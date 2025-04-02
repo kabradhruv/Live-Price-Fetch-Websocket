@@ -1,0 +1,173 @@
+import asyncio
+import json
+import logging
+from datetime import datetime
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, StreamingResponse
+import uvicorn
+
+# Import streaming functions and global data caches from each exchange module.
+from binance_websocket import stream_tickers as stream_binance, ticker_data as binance_ticker
+from kraken_websocket import stream_tickers as stream_kraken, ticker_data as kraken_ticker
+from coinbase_websocket import stream_tickers as stream_coinbase, ticker_data as coinbase_ticker
+from cryptocom_websocket import stream_orderbook as stream_cryptocom, orderbook_data as cryptocom_data
+
+PROFIT_THRESHOLD = 0.1
+
+# Global list of pairs in a common format.
+GLOBAL_PAIRS = [
+    "BTC/USD",
+    "ETH/USD",
+    "LTC/USD",
+    "XRP/USD",
+    "BCH/USD",
+    "ADA/USD",
+    "DOT/USD",
+    "LINK/USD",
+    "XLM/USD",
+    "EOS/USD"
+]
+
+def map_pair(global_pair, exchange):
+    """
+    Maps a global pair (e.g. "BTC/USD") to the exchange-specific format.
+    """
+    try:
+        base, quote = global_pair.split("/")
+    except ValueError:
+        return global_pair
+
+    if exchange.lower() == "binance":
+        if quote.upper() == "USD":
+            quote = "USDT"
+        return f"{base.upper()}{quote.upper()}"
+    elif exchange.lower() == "kraken":
+        if base.upper() == "BTC":
+            base = "XBT"
+        return f"{base.upper()}/{quote.upper()}"
+    elif exchange.lower() == "coinbase":
+        return f"{base.upper()}-{quote.upper()}"
+    elif exchange.lower() == "cryptocom":
+        return f"{base.upper()}{quote.upper()}-PERP"
+    else:
+        return global_pair
+
+def build_exchange_pairs(global_pairs, exchange):
+    """
+    Returns a list of exchange-specific pairs for the given global pairs.
+    """
+    return [map_pair(pair, exchange) for pair in global_pairs]
+
+# Configure logging for debugging
+logging.basicConfig(level=logging.DEBUG)
+
+app = FastAPI()
+
+@app.get("/", response_class=HTMLResponse)
+async def get_index():
+    """Serves the main HTML page."""
+    with open("index.html", "r") as f:
+        html_content = f.read()
+    logging.debug("Served index.html")
+    return html_content
+
+@app.get("/stream")
+async def stream():
+    """
+    SSE endpoint that streams the latest ticker data and arbitrage opportunities every second.
+    """
+    async def event_generator():
+        while True:
+            # Gather ticker data for each pair from global caches.
+            data_list = []
+            for pair in GLOBAL_PAIRS:
+                binance_sym   = map_pair(pair, "binance")
+                kraken_sym    = map_pair(pair, "kraken")
+                coinbase_sym  = map_pair(pair, "coinbase")
+                cryptocom_sym = map_pair(pair, "cryptocom")
+                
+                binance_data = binance_ticker.get(binance_sym, {"bid": None, "ask": None})
+                kraken_data = kraken_ticker.get(kraken_sym, {"bid": None, "ask": None})
+                coinbase_data = coinbase_ticker.get(coinbase_sym, {"bid": None, "ask": None})
+                cryptocom_data_item = cryptocom_data.get(cryptocom_sym, {"best_bid": None, "best_ask": None})
+                
+                pair_info = {
+                    "pair": pair,
+                    "binance": binance_data,
+                    "kraken": kraken_data,
+                    "coinbase": coinbase_data,
+                    "cryptocom": cryptocom_data_item,
+                }
+                data_list.append(pair_info)
+            
+                # Compute arbitrage opportunities for each pair.
+                arbitrage_opportunities = []
+                for item in data_list:
+                    pair = item["pair"]
+                    prices = {
+                        "binance": item["binance"],
+                        "kraken": item["kraken"],
+                        "coinbase": item["coinbase"],
+                        "cryptocom": item["cryptocom"]
+                    }
+                    for buy_ex, buy_data in prices.items():
+                        for sell_ex, sell_data in prices.items():
+                            if buy_ex == sell_ex:
+                                continue
+                            # Determine buy_price and sell_price. For Crypto.com, use best_ask/best_bid.
+                            buy_price = buy_data.get("ask") or buy_data.get("best_ask")
+                            sell_price = sell_data.get("bid") or sell_data.get("best_bid")
+                            
+                            if buy_price is not None and sell_price is not None:
+                                try:
+                                    # Convert values to float if they are not already.
+                                    buy_price_float = float(buy_price)
+                                    sell_price_float = float(sell_price)
+                                    profit_pct = round(((sell_price_float - buy_price_float) / buy_price_float) * 100, 2)
+                                    
+                                    if profit_pct >= PROFIT_THRESHOLD:
+                                        arbitrage_opportunities.append({
+                                            "pair": pair,
+                                            "buy_exchange": buy_ex,
+                                            "sell_exchange": sell_ex,
+                                            "buy_price": buy_price_float,
+                                            "sell_price": sell_price_float,
+                                            "profit_pct": profit_pct,
+                                        })
+                                except ValueError:
+                                    # Log conversion error and skip this pair
+                                    logging.debug(f"Conversion error for pair {pair} from {buy_ex} or {sell_ex}: buy_price={buy_price}, sell_price={sell_price}")
+                                    continue
+            
+            result = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "prices": data_list,
+                "arbitrage_opportunities": arbitrage_opportunities
+            }
+            
+            logging.debug(f"Sending data: {result}")
+            yield f"data: {json.dumps(result)}\n\n"
+            await asyncio.sleep(1)
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    On startup, launch background tasks to stream data from exchanges.
+    """
+    logging.debug("Starting background tasks for exchange streams")
+    binance_pairs   = build_exchange_pairs(GLOBAL_PAIRS, "binance")
+    kraken_pairs    = build_exchange_pairs(GLOBAL_PAIRS, "kraken")
+    coinbase_pairs  = build_exchange_pairs(GLOBAL_PAIRS, "coinbase")
+    cryptocom_pairs = build_exchange_pairs(GLOBAL_PAIRS, "cryptocom")
+    
+    loop = asyncio.get_event_loop()
+    loop.create_task(stream_binance(binance_pairs))
+    loop.create_task(stream_kraken(kraken_pairs))
+    loop.create_task(stream_coinbase(coinbase_pairs))
+    loop.create_task(stream_cryptocom(cryptocom_pairs))
+    logging.debug("Background tasks started.")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)
