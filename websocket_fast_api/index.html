@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Crypto Arbitrage Dashboard</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+    }
+    th, td {
+      border: 1px solid #333;
+      padding: 8px;
+      text-align: center;
+    }
+    th {
+      background-color: #eee;
+    }
+  </style>
+</head>
+<body>
+  <h1>Crypto Arbitrage Dashboard</h1>
+  <div id="timestamp"></div>
+  <h2>Prices</h2>
+  <table id="pricesTable">
+    <thead>
+      <tr>
+        <th>Pair</th>
+        <th>Binance Bid/Ask</th>
+        <th>Kraken Bid/Ask</th>
+        <th>Coinbase Bid/Ask</th>
+        <th>Crypto.com Bid/Ask</th>
+      </tr>
+    </thead>
+    <tbody>
+    </tbody>
+  </table>
+  <h2>Arbitrage Opportunities</h2>
+  <table id="arbTable">
+    <thead>
+      <tr>
+        <th>Pair</th>
+        <th>Buy Exchange</th>
+        <th>Sell Exchange</th>
+        <th>Buy Price</th>
+        <th>Sell Price</th>
+        <th>Profit (%)</th>
+      </tr>
+    </thead>
+    <tbody>
+    </tbody>
+  </table>
+  
+  <script>
+    // Open a connection to the SSE endpoint.
+    const evtSource = new EventSource("/stream");
+
+    evtSource.onmessage = function(event) {
+      const data = JSON.parse(event.data);
+      document.getElementById("timestamp").innerText = "Last update: " + data.timestamp;
+      
+      // Update the prices table.
+      const pricesTableBody = document.getElementById("pricesTable").getElementsByTagName("tbody")[0];
+      pricesTableBody.innerHTML = "";
+      data.prices.forEach(function(item) {
+        let row = `<tr>
+          <td>${item.pair}</td>
+          <td>${item.binance.bid} / ${item.binance.ask}</td>
+          <td>${item.kraken.bid} / ${item.kraken.ask}</td>
+          <td>${item.coinbase.bid} / ${item.coinbase.ask}</td>
+          <td>${item.cryptocom.best_bid} / ${item.cryptocom.best_ask}</td>
+        </tr>`;
+        pricesTableBody.innerHTML += row;
+      });
+      
+      // Update the arbitrage opportunities table.
+      const arbTableBody = document.getElementById("arbTable").getElementsByTagName("tbody")[0];
+      arbTableBody.innerHTML = "";
+      data.arbitrage_opportunities.forEach(function(arb) {
+        let row = `<tr>
+          <td>${arb.pair}</td>
+          <td>${arb.buy_exchange}</td>
+          <td>${arb.sell_exchange}</td>
+          <td>${arb.buy_price}</td>
+          <td>${arb.sell_price}</td>
+          <td>${arb.profit_pct}</td>
+        </tr>`;
+        arbTableBody.innerHTML += row;
+      });
+    };
+
+    evtSource.onerror = function(err) {
+      console.error("EventSource failed:", err);
+    };
+  </script>
+</body>
+</html>
